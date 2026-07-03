@@ -95,11 +95,29 @@ async def translate_srt(raw_path: str, out_path: str) -> None:
     if not subs:
         raise ValueError("SRT vazio ou não parseável.")
 
+    total_batches = -(-len(subs) // CHUNK_SIZE)  # ceil division
+    logger.info(
+        "Traduzindo %s blocos de legenda em %s lotes (concorrência=%s).",
+        len(subs),
+        total_batches,
+        MAX_CONCURRENCY,
+    )
+
     sem = asyncio.Semaphore(MAX_CONCURRENCY)
+    done = 0
 
     async def worker(start: int, block: list[srt.Subtitle]) -> tuple[int, list[str]]:
+        nonlocal done
         async with sem:
             translated = await _translate_texts([s.content for s in block])
+            done += 1
+            logger.info(
+                "Lote %s/%s traduzido (blocos %s–%s).",
+                done,
+                total_batches,
+                start + 1,
+                start + len(block),
+            )
             return start, translated
 
     tasks = [worker(start, block) for start, block in _chunks(subs, CHUNK_SIZE)]

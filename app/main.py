@@ -7,6 +7,7 @@ import hashlib
 import logging
 import os
 import secrets
+import time
 from urllib.parse import parse_qs, unquote
 
 from fastapi import FastAPI, HTTPException
@@ -81,27 +82,68 @@ async def _pipeline(
     final_path = config.CACHE_DIR / f"{key}.srt"
     raw_path = config.CACHE_DIR / f"{key}.raw.srt"
     tmp_path = config.CACHE_DIR / f"{key}.tmp.srt"
+    t0 = time.monotonic()
     try:
+        logger.info("[%s] [1/4] Buscando arquivo no TorBox...", key)
         url, verified = await torbox.resolve_download_url(filename, video_size, video_hash)
         if not url:
-            logger.info("[%s] Sem download_url no TorBox — abortando.", key)
+            logger.info(
+                "[%s] Sem download_url no TorBox — abortando (%.1fs).",
+                key,
+                time.monotonic() - t0,
+            )
             return
         logger.info(
-            "[%s] Arquivo resolvido (%s).",
+            "[%s] [1/4] Arquivo resolvido em %.1fs (%s).",
             key,
+            time.monotonic() - t0,
             "confirmado por hash de conteúdo" if verified else "heurística nome/tamanho, sem garantia",
         )
 
+        t_stage = time.monotonic()
+        logger.info("[%s] [2/4] Analisando faixas de legenda (ffprobe)...", key)
         stream_idx = await ffmpeg_utils.probe_text_subtitle(url)
-        await ffmpeg_utils.extract_subtitle(url, stream_idx, str(raw_path))
+        logger.info(
+            "[%s] [2/4] Faixa de legenda escolhida (índice %s) em %.1fs.",
+            key,
+            stream_idx,
+            time.monotonic() - t_stage,
+        )
 
+        t_stage = time.monotonic()
+        logger.info(
+            "[%s] [3/4] Extraindo legenda com ffmpeg (pode demorar minutos em "
+            "arquivos grandes)...",
+            key,
+        )
+        await ffmpeg_utils.extract_subtitle(url, stream_idx, str(raw_path))
+        logger.info(
+            "[%s] [3/4] Legenda extraída em %.1fs.", key, time.monotonic() - t_stage
+        )
+
+        t_stage = time.monotonic()
+        logger.info("[%s] [4/4] Traduzindo para PT-BR via Gemini...", key)
         await translator.translate_srt(str(raw_path), str(tmp_path))
+        logger.info(
+            "[%s] [4/4] Tradução concluída em %.1fs.", key, time.monotonic() - t_stage
+        )
+
         os.replace(tmp_path, final_path)  # publicação atômica
-        logger.info("[%s] Legenda pronta em cache.", key)
+        logger.info(
+            "[%s] Legenda pronta em cache. Tempo total: %.1fs.",
+            key,
+            time.monotonic() - t0,
+        )
     except NoEmbeddedSubtitle:
-        logger.info("[%s] Arquivo não possui legenda textual embutida.", key)
+        logger.info(
+            "[%s] Arquivo não possui legenda textual embutida (%.1fs).",
+            key,
+            time.monotonic() - t0,
+        )
     except Exception as exc:  # noqa: BLE001 - job em background não pode derrubar o server
-        logger.error("[%s] Falha no pipeline: %s", key, exc)
+        logger.error(
+            "[%s] Falha no pipeline após %.1fs: %s", key, time.monotonic() - t0, exc
+        )
     finally:
         for p in (raw_path, tmp_path):
             try:
@@ -134,13 +176,34 @@ async def _handle_subtitles(sub_type: str, sub_id: str, extra: str) -> dict:
     final_path = config.CACHE_DIR / f"{key}.srt"
 
     if final_path.exists():
-        logger.info("[%s] cache hit.", key)
+        logger.info("[%s] cache hit — servindo legenda já traduzida.", key)
         return _subtitle_response(key)
 
-    if key not in IN_FLIGHT:
-        IN_FLIGHT.add(key)
-        logger.info("[%s] iniciando pipeline (filename=%s).", key, filename)
-        asyncio.create_task(_pipeline(key, filename, video_size, video_hash))
+    if key in IN_FLIGHT:
+        logger.info(
+            "[%s] job já em andamento — esta requisição NÃO reinicia o pipeline "
+            "(o player costuma repetir o pedido; aguarde o log de progresso acima).",
+            key,
+        )
+        return {"subtitles": []}
+
+    IN_FLIGHT.add(key)
+    if not filename and not video_size and not video_hash:
+        logger.warning(
+            "[%s] Player não enviou filename/videoSize/videoHash — o arquivo será "
+            "escolhido apenas pelo MAIOR vídeo de toda a sua conta TorBox (baixíssima "
+            "confiança, pode pegar o arquivo errado).",
+            key,
+        )
+    logger.info(
+        "[%s] Novo pedido de legenda — sub_id=%s filename=%s videoSize=%s videoHash=%s.",
+        key,
+        sub_id,
+        filename,
+        video_size,
+        "sim" if video_hash else "não",
+    )
+    asyncio.create_task(_pipeline(key, filename, video_size, video_hash))
 
     # Prime: responde vazio agora; a legenda aparece ao reabrir o menu de legendas.
     return {"subtitles": []}
