@@ -22,6 +22,10 @@ PORT: int = int(os.getenv("PORT", "7000"))
 
 GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
+# Token secreto no caminho da URL (ex.: /{ADDON_TOKEN}/manifest.json). Protege o
+# addon quando exposto à internet pública — sem ele, TODAS as rotas retornam 404.
+ADDON_TOKEN: str = os.getenv("ADDON_TOKEN", "").strip()
+
 # Base da API do TorBox.
 TORBOX_BASE_URL: str = "https://api.torbox.app/v1"
 

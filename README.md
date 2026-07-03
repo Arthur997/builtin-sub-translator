@@ -6,7 +6,7 @@ debrid**, extrai a legenda **embutida** do arquivo, traduz para **PT-BR** com o
 
 ## Como funciona
 
-1. O player pede legendas (`/subtitles/movie/tt123/filename=...&videoSize=...&videoHash=...json`).
+1. O player pede legendas (`/{ADDON_TOKEN}/subtitles/movie/tt123/filename=...&videoSize=...&videoHash=...json`).
 2. O addon localiza candidatos na sua conta TorBox por `filename`/`videoSize`
    (o Stremio **não** envia o infohash do torrent). Quando o player manda
    `videoHash` (hash do OpenSubtitles), o addon **confirma** o candidato lendo
@@ -27,16 +27,25 @@ debrid**, extrai a legenda **embutida** do arquivo, traduz para **PT-BR** com o
   que você usa deve ter adicionado ao iniciar a reprodução).
 - `BASE_URL` deve ser alcançável **pelo dispositivo do player** — não use
   `localhost` se assistir noutro aparelho (use IP da LAN ou um túnel).
+- **`ADDON_TOKEN` é obrigatório.** Toda rota (manifest, subtitles, cache) exige
+  esse token como primeiro segmento da URL — sem ele configurado, ou com o
+  token errado, tudo retorna 404. Gere um valor forte:
+  ```bash
+  python -c "import secrets; print(secrets.token_urlsafe(24))"
+  ```
+  Isso é essencial se o addon for exposto à internet pública (ex.: via Tailscale
+  Funnel) — sem token, qualquer um que descobrisse a URL poderia consumir sua
+  cota do TorBox/Gemini.
 
 ## Rodando local
 
 ```bash
-cp .env.example .env   # preencha TORBOX_API_KEY, GEMINI_API_KEY, BASE_URL
+cp .env.example .env   # preencha TORBOX_API_KEY, GEMINI_API_KEY, BASE_URL, ADDON_TOKEN
 pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 7000
 ```
 
-Instale no Stremio abrindo `http://SEU_BASE_URL/manifest.json`.
+Instale no Stremio abrindo `http://SEU_BASE_URL/SEU_ADDON_TOKEN/manifest.json`.
 
 ## Docker
 

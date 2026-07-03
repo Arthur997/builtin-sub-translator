@@ -6,11 +6,12 @@ import asyncio
 import hashlib
 import logging
 import os
+import secrets
 from urllib.parse import parse_qs, unquote
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from . import config, ffmpeg_utils, torbox, translator
 from .ffmpeg_utils import NoEmbeddedSubtitle
@@ -31,10 +32,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/cache", StaticFiles(directory=str(config.CACHE_DIR)), name="cache")
+# Todas as rotas (manifest, subtitles e cache) exigem o mesmo token no prefixo
+# da URL. Sem ADDON_TOKEN configurado, o addon fica inacessível por padrão —
+# nunca fica "aberto" por esquecimento.
 
 # Jobs de tradução em andamento, para não disparar trabalho duplicado.
 IN_FLIGHT: set[str] = set()
+
+
+def _check_token(token: str) -> None:
+    if not config.ADDON_TOKEN or not secrets.compare_digest(token, config.ADDON_TOKEN):
+        raise HTTPException(status_code=404)
+
 
 MANIFEST = {
     "id": "com.nfasoft.stremio.translator",
@@ -107,7 +116,7 @@ def _subtitle_response(key: str) -> dict:
         "subtitles": [
             {
                 "id": key,
-                "url": f"{config.BASE_URL}/cache/{key}.srt",
+                "url": f"{config.BASE_URL}/{config.ADDON_TOKEN}/cache/{key}.srt",
                 "lang": "pob",  # código do Stremio para português do Brasil
             }
         ]
@@ -137,19 +146,34 @@ async def _handle_subtitles(sub_type: str, sub_id: str, extra: str) -> dict:
     return {"subtitles": []}
 
 
-@app.get("/manifest.json")
-async def manifest() -> dict:
+@app.get("/{token}/manifest.json")
+async def manifest(token: str) -> dict:
+    _check_token(token)
     return MANIFEST
 
 
-@app.get("/subtitles/{sub_type}/{sub_id}/{extra:path}")
-async def subtitles_with_extra(sub_type: str, sub_id: str, extra: str) -> dict:
+@app.get("/{token}/subtitles/{sub_type}/{sub_id}/{extra:path}")
+async def subtitles_with_extra(
+    token: str, sub_type: str, sub_id: str, extra: str
+) -> dict:
+    _check_token(token)
     return await _handle_subtitles(sub_type, sub_id, extra)
 
 
-@app.get("/subtitles/{sub_type}/{sub_id}.json")
-async def subtitles_plain(sub_type: str, sub_id: str) -> dict:
+@app.get("/{token}/subtitles/{sub_type}/{sub_id}.json")
+async def subtitles_plain(token: str, sub_type: str, sub_id: str) -> dict:
+    _check_token(token)
     return await _handle_subtitles(sub_type, sub_id, "")
+
+
+@app.get("/{token}/cache/{filename}")
+async def serve_cache_file(token: str, filename: str) -> FileResponse:
+    _check_token(token)
+    safe_name = os.path.basename(filename)  # evita path traversal
+    path = config.CACHE_DIR / safe_name
+    if not path.is_file():
+        raise HTTPException(status_code=404)
+    return FileResponse(path, media_type="text/plain; charset=utf-8")
 
 
 @app.get("/health")
