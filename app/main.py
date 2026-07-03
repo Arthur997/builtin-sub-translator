@@ -1,0 +1,163 @@
+"""Servidor FastAPI: manifesto, rota de legendas do Stremio, static e jobs em background."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import logging
+import os
+from urllib.parse import parse_qs, unquote
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from . import config, ffmpeg_utils, torbox, translator
+from .ffmpeg_utils import NoEmbeddedSubtitle
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logger = logging.getLogger("main")
+
+app = FastAPI(title="Stremio Translator Addon")
+
+# Stremio busca o manifesto/legendas de origem web -> CORS liberado.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+app.mount("/cache", StaticFiles(directory=str(config.CACHE_DIR)), name="cache")
+
+# Jobs de tradução em andamento, para não disparar trabalho duplicado.
+IN_FLIGHT: set[str] = set()
+
+MANIFEST = {
+    "id": "com.nfasoft.stremio.translator",
+    "version": "1.0.0",
+    "name": "Legendas Traduzidas (TorBox → PT-BR)",
+    "description": (
+        "Extrai a legenda embutida do arquivo no TorBox e traduz para português "
+        "do Brasil via IA."
+    ),
+    "resources": ["subtitles"],
+    "types": ["movie", "series"],
+    "idPrefixes": ["tt"],
+    "catalogs": [],
+}
+
+
+def _parse_extra(extra: str) -> dict[str, str]:
+    """Converte o segmento `extra` do Stremio (k=v&k=v) num dict."""
+    extra = unquote(extra or "").removesuffix(".json")
+    if not extra:
+        return {}
+    parsed = parse_qs(extra, keep_blank_values=True)
+    return {k: v[0] for k, v in parsed.items()}
+
+
+def _cache_key(sub_id: str, filename: str | None, video_size: str | None) -> str:
+    basis = filename or f"{sub_id}:{video_size or ''}"
+    return hashlib.sha1(basis.encode("utf-8")).hexdigest()
+
+
+async def _pipeline(
+    key: str, filename: str | None, video_size: int | None, video_hash: str | None
+) -> None:
+    """Busca no TorBox, extrai a legenda, traduz e grava atomicamente no cache."""
+    final_path = config.CACHE_DIR / f"{key}.srt"
+    raw_path = config.CACHE_DIR / f"{key}.raw.srt"
+    tmp_path = config.CACHE_DIR / f"{key}.tmp.srt"
+    try:
+        url, verified = await torbox.resolve_download_url(filename, video_size, video_hash)
+        if not url:
+            logger.info("[%s] Sem download_url no TorBox — abortando.", key)
+            return
+        logger.info(
+            "[%s] Arquivo resolvido (%s).",
+            key,
+            "confirmado por hash de conteúdo" if verified else "heurística nome/tamanho, sem garantia",
+        )
+
+        stream_idx = await ffmpeg_utils.probe_text_subtitle(url)
+        await ffmpeg_utils.extract_subtitle(url, stream_idx, str(raw_path))
+
+        await translator.translate_srt(str(raw_path), str(tmp_path))
+        os.replace(tmp_path, final_path)  # publicação atômica
+        logger.info("[%s] Legenda pronta em cache.", key)
+    except NoEmbeddedSubtitle:
+        logger.info("[%s] Arquivo não possui legenda textual embutida.", key)
+    except Exception as exc:  # noqa: BLE001 - job em background não pode derrubar o server
+        logger.error("[%s] Falha no pipeline: %s", key, exc)
+    finally:
+        for p in (raw_path, tmp_path):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+        IN_FLIGHT.discard(key)
+
+
+def _subtitle_response(key: str) -> dict:
+    return {
+        "subtitles": [
+            {
+                "id": key,
+                "url": f"{config.BASE_URL}/cache/{key}.srt",
+                "lang": "pob",  # código do Stremio para português do Brasil
+            }
+        ]
+    }
+
+
+async def _handle_subtitles(sub_type: str, sub_id: str, extra: str) -> dict:
+    meta = _parse_extra(extra)
+    filename = meta.get("filename")
+    video_size_raw = meta.get("videoSize")
+    video_size = int(video_size_raw) if (video_size_raw or "").isdigit() else None
+    video_hash = meta.get("videoHash") or None
+
+    key = _cache_key(sub_id, filename, video_size_raw)
+    final_path = config.CACHE_DIR / f"{key}.srt"
+
+    if final_path.exists():
+        logger.info("[%s] cache hit.", key)
+        return _subtitle_response(key)
+
+    if key not in IN_FLIGHT:
+        IN_FLIGHT.add(key)
+        logger.info("[%s] iniciando pipeline (filename=%s).", key, filename)
+        asyncio.create_task(_pipeline(key, filename, video_size, video_hash))
+
+    # Prime: responde vazio agora; a legenda aparece ao reabrir o menu de legendas.
+    return {"subtitles": []}
+
+
+@app.get("/manifest.json")
+async def manifest() -> dict:
+    return MANIFEST
+
+
+@app.get("/subtitles/{sub_type}/{sub_id}/{extra:path}")
+async def subtitles_with_extra(sub_type: str, sub_id: str, extra: str) -> dict:
+    return await _handle_subtitles(sub_type, sub_id, extra)
+
+
+@app.get("/subtitles/{sub_type}/{sub_id}.json")
+async def subtitles_plain(sub_type: str, sub_id: str) -> dict:
+    return await _handle_subtitles(sub_type, sub_id, "")
+
+
+@app.get("/health")
+async def health() -> dict:
+    return {"status": "ok", "in_flight": len(IN_FLIGHT)}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("app.main:app", host="0.0.0.0", port=config.PORT)

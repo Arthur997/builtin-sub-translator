@@ -1,0 +1,12 @@
+services:
+  stremio-translator:
+    build: .
+    image: stremio-translator-addon:latest
+    container_name: stremio-translator
+    restart: unless-stopped
+    ports:
+      - "7000:7000"
+    env_file:
+      - .env
+    volumes:
+      - ./cache:/app/cache
