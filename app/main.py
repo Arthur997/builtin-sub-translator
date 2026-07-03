@@ -131,7 +131,9 @@ async def _pipeline(
             "arquivos grandes)...",
             key,
         )
-        await ffmpeg_utils.extract_subtitle(result.url, stream_idx, str(raw_path))
+        await ffmpeg_utils.extract_subtitle(
+            result.url, stream_idx, str(raw_path), log_prefix=key
+        )
         logger.info(
             "[%s] [3/4] Legenda extraída em %.1fs.", key, time.monotonic() - t_stage
         )
