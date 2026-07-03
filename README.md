@@ -51,9 +51,15 @@ docker run -d -p 7000:7000 --env-file .env -v "$PWD/cache:/app/cache" stremio-tr
 git clone https://github.com/Arthur997/builtin-sub-translator.git
 cd builtin-sub-translator
 cp .env.example .env   # preencha TORBOX_API_KEY, GEMINI_API_KEY e BASE_URL
-# BASE_URL deve ser o IP/host do home server na sua rede, ex: http://192.168.1.50:7000
+# BASE_URL deve ser o IP/host do home server + a PORTA DO HOST (docker-compose.yml
+# mapeia 3044 -> 7000), ex: http://192.168.1.50:3044
 docker compose up -d --build
 ```
+
+O `docker-compose.yml` já expõe o addon na **porta 3044** do host (mapeada para a
+7000 interna do container), para não colidir com outros serviços já rodando no
+seu home server. Para usar outra porta, edite o `ports:` do `docker-compose.yml`
+(`"SUA_PORTA:7000"`) e ajuste `BASE_URL` no `.env` de acordo.
 
 Para atualizar depois de um `git pull`:
 

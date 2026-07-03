@@ -5,7 +5,7 @@ services:
     container_name: stremio-translator
     restart: unless-stopped
     ports:
-      - "7000:7000"
+      - "3044:7000"  # porta 3044 no host -> 7000 dentro do container
     env_file:
       - .env
     volumes:
