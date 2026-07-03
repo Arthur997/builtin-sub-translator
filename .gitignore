@@ -1,6 +1,9 @@
 # Segredos
 .env
 
+# Utilitários locais (não fazem parte do addon)
+scripts/
+
 # Legendas geradas (dados locais, não versionar)
 cache/*.srt
 cache/*.raw.srt
