@@ -89,7 +89,12 @@ def _human_size(num_bytes: int | None) -> str:
 
 
 async def _pipeline(
-    key: str, filename: str | None, video_size: int | None, video_hash: str | None
+    key: str,
+    filename: str | None,
+    video_size: int | None,
+    video_hash: str | None,
+    sub_id: str,
+    sub_type: str,
 ) -> None:
     """Busca no TorBox, extrai a legenda, traduz e grava atomicamente no cache."""
     final_path = config.CACHE_DIR / f"{key}.srt"
@@ -98,7 +103,9 @@ async def _pipeline(
     t0 = time.monotonic()
     try:
         logger.info("[%s] [1/4] Buscando arquivo no TorBox...", key)
-        result = await torbox.resolve_download_url(filename, video_size, video_hash)
+        result = await torbox.resolve_download_url(
+            filename, video_size, video_hash, sub_id=sub_id, media_type=sub_type
+        )
         if not result.url:
             logger.info(
                 "[%s] Sem download_url no TorBox — abortando (%.1fs).",
@@ -224,9 +231,9 @@ async def _handle_subtitles(
     IN_FLIGHT.add(key)
     if not filename and not video_size and not video_hash:
         logger.warning(
-            "[%s] Player não enviou filename/videoSize/videoHash — o arquivo será "
-            "escolhido apenas pelo MAIOR vídeo de toda a sua conta TorBox (baixíssima "
-            "confiança, pode pegar o arquivo errado).",
+            "[%s] Player não enviou filename/videoSize/videoHash — tentando casar "
+            "pelo título (via Cinemeta) + episódio; se isso falhar, cai no último "
+            "recurso (maior vídeo de toda a conta TorBox, baixíssima confiança).",
             key,
         )
     logger.info(
@@ -237,7 +244,9 @@ async def _handle_subtitles(
         video_size,
         "sim" if video_hash else "não",
     )
-    asyncio.create_task(_pipeline(key, filename, video_size, video_hash))
+    asyncio.create_task(
+        _pipeline(key, filename, video_size, video_hash, sub_id, sub_type)
+    )
 
     # Prime: responde vazio agora; a legenda aparece ao reabrir o menu de legendas.
     return {"subtitles": []}
