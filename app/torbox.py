@@ -34,6 +34,16 @@ class Candidate(NamedTuple):
     size: int
 
 
+class ResolveResult(NamedTuple):
+    url: str | None
+    verified: bool
+    name: str | None
+    size: int | None
+
+
+_NOT_FOUND = ResolveResult(None, False, None, None)
+
+
 def _is_video(name: str) -> bool:
     return name.lower().endswith(VIDEO_EXTS)
 
@@ -147,8 +157,8 @@ async def resolve_download_url(
     filename: str | None,
     video_size: int | None,
     video_hash: str | None = None,
-) -> tuple[str | None, bool]:
-    """Localiza o arquivo no TorBox e devolve (download_url, verificado_por_conteudo).
+) -> ResolveResult:
+    """Localiza o arquivo no TorBox e devolve (download_url, verificado, nome, tamanho).
 
     Com `video_hash` (OpenSubtitles hash enviado pelo Stremio no `extra`), o
     candidato é confirmado byte a byte antes de aceitar. Sem ele, cai na
@@ -156,7 +166,7 @@ async def resolve_download_url(
     """
     if not config.TORBOX_API_KEY:
         logger.error("TORBOX_API_KEY não configurada.")
-        return None, False
+        return _NOT_FOUND
 
     async with httpx.AsyncClient(
         base_url=config.TORBOX_BASE_URL, headers=_HEADERS, timeout=30.0
@@ -168,12 +178,12 @@ async def resolve_download_url(
             resp.raise_for_status()
         except httpx.HTTPError as exc:
             logger.error("Falha ao consultar mylist do TorBox: %s", exc)
-            return None, False
+            return _NOT_FOUND
 
         torrents = resp.json().get("data") or []
         if not isinstance(torrents, list):
             logger.error("Resposta inesperada da mylist do TorBox.")
-            return None, False
+            return _NOT_FOUND
 
         candidates = _rank_candidates(torrents, filename, video_size)
         if not candidates:
@@ -182,7 +192,7 @@ async def resolve_download_url(
                 filename,
                 video_size,
             )
-            return None, False
+            return _NOT_FOUND
 
         if video_hash:
             checked = candidates[:_MAX_HASH_CANDIDATES]
@@ -192,11 +202,13 @@ async def resolve_download_url(
                     continue
                 if await _verify_by_content_hash(client, url, c.size, video_hash):
                     logger.info(
-                        "Match CONFIRMADO por hash de conteúdo: torrent=%s file=%s.",
+                        "Match CONFIRMADO por hash de conteúdo: torrent=%s file=%s nome=%r tamanho=%s.",
                         c.torrent_id,
                         c.file_id,
+                        c.name,
+                        c.size,
                     )
-                    return url, True
+                    return ResolveResult(url, True, c.name, c.size)
             logger.warning(
                 "videoHash fornecido mas nenhum dos %s candidatos bateu — usando heurística.",
                 len(checked),
@@ -206,10 +218,12 @@ async def resolve_download_url(
         best = candidates[0]
         url = await _get_download_url(client, best)
         if not url:
-            return None, False
+            return _NOT_FOUND
         logger.info(
-            "Match HEURÍSTICO (sem verificação de conteúdo): torrent=%s file=%s.",
+            "Match HEURÍSTICO (sem verificação de conteúdo): torrent=%s file=%s nome=%r tamanho=%s.",
             best.torrent_id,
             best.file_id,
+            best.name,
+            best.size,
         )
-        return url, False
+        return ResolveResult(url, False, best.name, best.size)

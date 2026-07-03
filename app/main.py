@@ -75,6 +75,17 @@ def _cache_key(sub_id: str, filename: str | None, video_size: str | None) -> str
     return hashlib.sha1(basis.encode("utf-8")).hexdigest()
 
 
+def _human_size(num_bytes: int | None) -> str:
+    if not num_bytes:
+        return "tamanho desconhecido"
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024:
+            return f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{size:.1f}TB"
+
+
 async def _pipeline(
     key: str, filename: str | None, video_size: int | None, video_hash: str | None
 ) -> None:
@@ -85,8 +96,8 @@ async def _pipeline(
     t0 = time.monotonic()
     try:
         logger.info("[%s] [1/4] Buscando arquivo no TorBox...", key)
-        url, verified = await torbox.resolve_download_url(filename, video_size, video_hash)
-        if not url:
+        result = await torbox.resolve_download_url(filename, video_size, video_hash)
+        if not result.url:
             logger.info(
                 "[%s] Sem download_url no TorBox — abortando (%.1fs).",
                 key,
@@ -94,15 +105,17 @@ async def _pipeline(
             )
             return
         logger.info(
-            "[%s] [1/4] Arquivo resolvido em %.1fs (%s).",
+            '[%s] [1/4] Arquivo resolvido em %.1fs: "%s" (%s) — %s.',
             key,
             time.monotonic() - t0,
-            "confirmado por hash de conteúdo" if verified else "heurística nome/tamanho, sem garantia",
+            result.name or "?",
+            _human_size(result.size),
+            "confirmado por hash de conteúdo" if result.verified else "heurística nome/tamanho, sem garantia",
         )
 
         t_stage = time.monotonic()
         logger.info("[%s] [2/4] Analisando faixas de legenda (ffprobe)...", key)
-        stream_idx = await ffmpeg_utils.probe_text_subtitle(url)
+        stream_idx = await ffmpeg_utils.probe_text_subtitle(result.url)
         logger.info(
             "[%s] [2/4] Faixa de legenda escolhida (índice %s) em %.1fs.",
             key,
@@ -116,7 +129,7 @@ async def _pipeline(
             "arquivos grandes)...",
             key,
         )
-        await ffmpeg_utils.extract_subtitle(url, stream_idx, str(raw_path))
+        await ffmpeg_utils.extract_subtitle(result.url, stream_idx, str(raw_path))
         logger.info(
             "[%s] [3/4] Legenda extraída em %.1fs.", key, time.monotonic() - t_stage
         )
