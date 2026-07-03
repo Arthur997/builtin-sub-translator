@@ -10,9 +10,11 @@ import secrets
 import time
 from urllib.parse import parse_qs, unquote
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import config, ffmpeg_utils, torbox, translator
 from .ffmpeg_utils import NoEmbeddedSubtitle
@@ -178,8 +180,25 @@ def _subtitle_response(key: str) -> dict:
     }
 
 
-async def _handle_subtitles(sub_type: str, sub_id: str, extra: str) -> dict:
+async def _handle_subtitles(
+    sub_type: str, sub_id: str, extra: str, request: Request
+) -> dict:
+    query = dict(request.query_params)
+    logger.info(
+        "[RAW] %s %s | extra_path=%r query_string=%r headers=%s",
+        request.method,
+        request.url.path,
+        extra,
+        query,
+        dict(request.headers),
+    )
+
     meta = _parse_extra(extra)
+    # Alguns players mandam filename/videoSize/videoHash como query string em vez
+    # de no segmento de path `extra` do protocolo padrão do Stremio — aceita os dois.
+    for k, v in query.items():
+        meta.setdefault(k, v)
+
     filename = meta.get("filename")
     video_size_raw = meta.get("videoSize")
     video_size = int(video_size_raw) if (video_size_raw or "").isdigit() else None
@@ -230,16 +249,18 @@ async def manifest(token: str) -> dict:
 
 @app.get("/{token}/subtitles/{sub_type}/{sub_id}/{extra:path}")
 async def subtitles_with_extra(
-    token: str, sub_type: str, sub_id: str, extra: str
+    token: str, sub_type: str, sub_id: str, extra: str, request: Request
 ) -> dict:
     _check_token(token)
-    return await _handle_subtitles(sub_type, sub_id, extra)
+    return await _handle_subtitles(sub_type, sub_id, extra, request)
 
 
 @app.get("/{token}/subtitles/{sub_type}/{sub_id}.json")
-async def subtitles_plain(token: str, sub_type: str, sub_id: str) -> dict:
+async def subtitles_plain(
+    token: str, sub_type: str, sub_id: str, request: Request
+) -> dict:
     _check_token(token)
-    return await _handle_subtitles(sub_type, sub_id, "")
+    return await _handle_subtitles(sub_type, sub_id, "", request)
 
 
 @app.get("/{token}/cache/{filename}")
@@ -255,6 +276,22 @@ async def serve_cache_file(token: str, filename: str) -> FileResponse:
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok", "in_flight": len(IN_FLIGHT)}
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _log_404(request: Request, exc: StarletteHTTPException):
+    # Loga requisições que não bateram com NENHUMA rota (token errado, ou o
+    # player chamando um formato de URL diferente do esperado) — útil pra ver
+    # exatamente o que está chegando quando nada parece funcionar.
+    if exc.status_code == 404:
+        logger.warning(
+            "[404] %s %s%s headers=%s",
+            request.method,
+            request.url.path,
+            f"?{request.url.query}" if request.url.query else "",
+            dict(request.headers),
+        )
+    return await http_exception_handler(request, exc)
 
 
 if __name__ == "__main__":
